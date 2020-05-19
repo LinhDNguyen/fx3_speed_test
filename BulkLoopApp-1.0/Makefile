@@ -2,7 +2,7 @@ CC = gcc -pipe
 VERSION = 1.0
 CFLAGS = -O2 -fno-exceptions -DUSBTESTAPP_VERSION=\"$(VERSION)\" \
 	-W -Wall -Wformat
-LDFLAGS = -lusb-1.0
+LDFLAGS = -lusb-1.0 -lpthread
 DIST_DEST = BulkLoopApp-$(VERSION)
 
 all: BulkLoopApp
@@ -12,7 +12,7 @@ BulkLoopApp: bulkloopapp.o
 	$(CC) bulkloopapp.o $(LDFLAGS) -o BulkLoopApp
 
 clean:
-	-rm -f bulkloopapp.o
+	-rm -f bulkloopapp.o BulkLoopApp
 
 distclean: clean
 	-rm -f BulkLoopApp

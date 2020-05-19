@@ -1,10 +1,13 @@
-/* 
+/*
 * bulkloopapp.c -- Program for testing USB communication using libusb 1.0
 * Cypress semiconductor. 2011
 */
 
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
+#include <time.h>
+
 #include "bulkloopapp.h"
 
 //handle of selected device to work on
@@ -15,7 +18,7 @@ unsigned char glInEpNum=0;
 unsigned char glOutEpNum=0;
 unsigned int  glInMaxPacketSize=0;
 unsigned int  glOutMaxPacketSize=0;
- 
+
 void  device_info()
 {
     struct libusb_config_descriptor *config;
@@ -80,8 +83,8 @@ void  device_info()
 
 int get_ep_info(void)
 {
-	
-	int err;	
+
+	int err;
 	struct libusb_device_descriptor desc;
 	struct libusb_config_descriptor *config;
     const struct libusb_interface *inter;
@@ -89,9 +92,9 @@ int get_ep_info(void)
     const struct libusb_endpoint_descriptor *epdesc;
     int k;
 
-	//detect the bulkloop is running from VID/PID 
+	//detect the bulkloop is running from VID/PID
     err = libusb_get_device_descriptor(device, &desc);
-    if (err < 0) 
+    if (err < 0)
     {
         printf("\n\tFailed to get device descriptor for the device, returning");
         return 1;
@@ -104,9 +107,9 @@ int get_ep_info(void)
 
     else
     {
-        printf("\n ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------");  
+        printf("\n ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------");
         printf("\nFor seeing whole bulkloop action from HOST -> TARGET ->HOST, Please run correct firmware on TARGET and restart this program");
-        printf("\n -----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------");  
+        printf("\n -----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------");
         return 1;
     }
 
@@ -115,74 +118,81 @@ int get_ep_info(void)
 	/* this device has only one interface */
 	if(((int) config->bNumInterfaces)>1)
 	{
-		printf("to many interfaces\n");		
+		printf("to many interfaces\n");
 		return 1;
-	}    
+	}
 
-	
+
 	/* Interface has only two bulk Endpoints */
     inter = &config->interface[0];
 	interdesc = &inter->altsetting[0];
 	if(((int) interdesc->bNumEndpoints)>2)
 	{
-		printf("to many Endpoints\n");		
+		printf("to many Endpoints\n");
 		return 1;
-	}    
+	}
 
 	/*find Endpoint address, direction and size*/
 	for(k=0;k<(int) interdesc->bNumEndpoints;k++)
 	{
 
 		epdesc = &interdesc->endpoint[k];
-	
+
 		if((epdesc->bEndpointAddress) & 0x80)
 		{
 			printf("Bulk IN Endpoint 0x%02x\n", epdesc->bEndpointAddress);
 			glInEpNum=epdesc->bEndpointAddress;
-			glInMaxPacketSize=epdesc->wMaxPacketSize;		
+			glInMaxPacketSize=epdesc->wMaxPacketSize;
 		}
 		else
 		{
 			printf("Bulk OUT Endpoint 0x%02x\n", epdesc->bEndpointAddress);
 			glOutEpNum=epdesc->bEndpointAddress;
-			glOutMaxPacketSize=epdesc->wMaxPacketSize;		
+			glOutMaxPacketSize=epdesc->wMaxPacketSize;
 		}
-	} 
-    
+	}
+
 	if(glOutMaxPacketSize!=glInMaxPacketSize)
 	{
-		printf("\nEndpoints size is not maching\n");		
+		printf("\nEndpoints size is not maching\n");
 		return 1;
 
 	}
     libusb_free_config_descriptor(config);
 	return 0;
-
-
 }
 
 void  bulk_transfer()
 {
     int err;
     int i;
-    int usr_choice,data_byte;
-    int transffered_bytes; //actual transffered bytes
-    unsigned char out_data_buf[1024];
-    unsigned char in_data_buf[1024];
+    int sent_count;
+    int recv_count;
+    int transffered_bytes;
+#define MAX_BUF_SIZE (50*1024*1024)
+    unsigned char *out_data = (unsigned char *)calloc(1, MAX_BUF_SIZE);
+    unsigned char *in_data = (unsigned char *)calloc(1, MAX_BUF_SIZE);
     struct libusb_device_descriptor desc;
+    struct timespec t_start = {0};
+    struct timespec t_end = {0};
+    unsigned long long start_t = 0, end_t = 0, elapsed = 0;
 
-    printf("\n-------------------------------------------------------------------------------------------------");  
+    printf("\n-------------------------------------------------------------------------------------------------");
     printf("\nThis function is for testing the bulk transfers. It will write on OUT endpoint and read from IN endpoint");
-    printf("\n-------------------------------------------------------------------------------------------------");      
+    printf("\n-------------------------------------------------------------------------------------------------");
 
-    //detect the bulkloop is running from VID/PID 
+    if ((out_data == NULL) || (in_data == NULL)) {
+        printf("\n\tFailed to allocate buffers. %p - %p", in_data, out_data);
+        return;
+    }
+
+    //detect the bulkloop is running from VID/PID
     err = libusb_get_device_descriptor(device, &desc);
-    if (err < 0) 
+    if (err < 0)
     {
         printf("\n\tFailed to get device descriptor for the device, returning");
         return;
     }
-
 
 	if(get_ep_info())
 	{
@@ -190,8 +200,12 @@ void  bulk_transfer()
         return;
 	}
 
-  
-    // While claiming the interface, interface 0 is claimed since from our bulkloop firmware we know that. 
+    // Prepare send buf
+    for (i = 0; i < MAX_BUF_SIZE; ++i) {
+        out_data[i] = i & 0xff;
+    }
+
+    // While claiming the interface, interface 0 is claimed since from our bulkloop firmware we know that.
     err = libusb_claim_interface (dev_handle, 0);
     if(err)
     {
@@ -199,118 +213,80 @@ void  bulk_transfer()
         return;
     }
 
-    //Create a buffer of users choice
-    printf("\n-------------------------------------------------------------------------------------------------");  
-    printf("\n\nPlease select %d byte data to be transffered :-", glOutMaxPacketSize);
-    printf("\n1. Incrementing pattern");
-    printf("\n2. Decrementing pattern");
-    printf("\n3. Same data in all bytes");
-    /*printf("\n4. User defined data for every byte");*/
+    // Prepare transferring
+    sent_count = 0;
+    recv_count = 0;
+    transffered_bytes = 0;
+
+    printf("\nTransffering %d bytes from HOST(PC) -> TARGET(Bulkloop device) -> HOST(PC) loopback", glOutMaxPacketSize);
+    clock_gettime(CLOCK_REALTIME, &t_start);
+
     do {
-        printf("\n\nEnter the choice [e.g 2]        :");
-        err = scanf("%d",&usr_choice);
-        if (err == 0)
+        err = libusb_bulk_transfer(dev_handle,glOutEpNum,out_data + sent_count,glOutMaxPacketSize,&transffered_bytes,100);
+        if(err)
         {
-            err = scanf ("%s", in_data_buf);
-            err = 0;
+            printf("\nBytes transffres failed, err: %d transffred bytes : %d",err,transffered_bytes);
+            break;
         }
-    } while (err != 1);
-    do {
-        printf("\nNow please enter the data byte  :");
-        err = scanf("%d",&data_byte);
-        if (err == 0)
+        sent_count += transffered_bytes;
+        transffered_bytes = 0;
+        err = libusb_bulk_transfer(dev_handle,glInEpNum,in_data + recv_count,glInMaxPacketSize,&transffered_bytes,100);
+        if(err)
         {
-            err = scanf ("%s", in_data_buf);
-            err = 0;
+            printf("\nreturn transffer failed, err: %d transffred bytes : %d",err,transffered_bytes);
+            break;
         }
-    } while (err != 1);
-    printf("\n---------------------------------------------------------------------------------------------------\n");        
-    
-    switch(usr_choice)
+        recv_count += transffered_bytes;
+    } while(recv_count < MAX_BUF_SIZE);
+    clock_gettime(CLOCK_REALTIME, &t_end);
+    start_t = t_start.tv_sec * 1000000 + t_start.tv_nsec / 1000;
+    end_t = t_end.tv_sec * 1000000 + t_end.tv_nsec / 1000;
+    elapsed = end_t - start_t;
+
+    printf("\n\t%d sent, %d recv in %llu us", sent_count, recv_count, elapsed);
+
+    for (i = 0; i < MAX_BUF_SIZE; ++i) {
+        if (in_data[i] != (i & 0xff)) {
+            break;
+        }
+    }
+    if (i < MAX_BUF_SIZE) {
+        printf("\n\tRecv data ERROR at %d", i);
+    } else {
+        printf("\n\tRECV DATA OK");
+    }
+
+    printf("\n\t SPEED: %d/%llu = %f Bytes/second", i, elapsed, (double)i/((double)elapsed/1000000.0f));
+
+    printf("\n");
+    //release the interface claimed erlier
+    err = libusb_release_interface (dev_handle, 0);
+    if(err)
     {
-         case 1:
-            printf("\nFilling the buffer...");
-            for(i=0; i < (int)glOutMaxPacketSize; i++)
-            {    
-                out_data_buf[i] = (unsigned char)data_byte;
-                data_byte++;
-            }        
-            break;
-        case 2:
-            printf("\nFilling the buffer...");
-            for(i=0; i < (int)glOutMaxPacketSize; i++)
-            {    
-                out_data_buf[i] = (unsigned char)data_byte;
-                //if(data_byte != 0)
-                    data_byte--;
-            }        
-            break;
-        /*case 4:
-            printf("\nNot implemented yet, will fill buffer withy same data");*/
-        case 3:
-            printf("\nFilling the buffer...");
-            for(i=0; i < (int)glOutMaxPacketSize; i++)
-                out_data_buf[i] = (unsigned char)data_byte;
-            break;
-        default:
-            printf("\nSince not entered correct choice between 1 to 4, ");
-            printf("\nfilling the buffer with entered data byte ");
-            printf("\nFilling the buffer...");
-            for(i=0; i < (int)glOutMaxPacketSize; i++)
-                out_data_buf[i] = (unsigned char)data_byte;
-     }
-     printf("\nTransffering %d bytes from HOST(PC) -> TARGET(Bulkloop device)", glOutMaxPacketSize);
-     err = libusb_bulk_transfer(dev_handle,glOutEpNum,out_data_buf,glOutMaxPacketSize,&transffered_bytes,100); 
-     if(err)
-     {
-        printf("\nBytes transffres failed, err: %d transffred bytes : %d",err,transffered_bytes); 
-        return;
-     }   
-     transffered_bytes = 0;
-     printf("\nReturning %d bytes from TARGET(Bulkloop device) -> HOST(PC)", glInMaxPacketSize);
-     err = libusb_bulk_transfer(dev_handle,glInEpNum,in_data_buf,glInMaxPacketSize,&transffered_bytes,100);
-     if(err)
-     {
-        printf("\nreturn transffer failed, err: %d transffred bytes : %d",err,transffered_bytes);
-        return;
-     }     
-     printf("\n\n------------------------------------------------------------------------------------------------------------------");
-     printf("\n\nBulkloop transfers completed successfully:");
-     printf("\nData Transffered: %d bytes \n\n", transffered_bytes);
-     for(i=0; i < (int)transffered_bytes; i++)
-        printf("%d\t",out_data_buf[i]);
-     printf("\n\nData Received: %d bytes\n\n", transffered_bytes);
-     for(i=0; i < (int)transffered_bytes; i++)
-        printf("%d\t",in_data_buf[i]);
-     printf("\n\nPlease check if Bytes Transferred are same as Bytes Received through Bulkloop process");
-     printf("\n\n------------------------------------------------------------------------------------------------------------------\n\n");     
-     
-     
-     //release the interface claimed erlier
-     err = libusb_release_interface (dev_handle, 0);     
-     if(err)
-     {
         printf("\nThe device interface is not getting released, if system hangs please disconnect the device, returning");
         return;
-     }
+    }
+
+    free(in_data);
+    free(out_data);
 }
 
 //Print info about the buses and devices.
 int print_info(libusb_device **devs)
-{	
+{
 	int i,j;
 	int busNo, devNo;
     int err = 0;
 
     i = j = 0;
-    
-    printf("\nList of Buses and Devices attached :- \n\n");    
-	while ((device = devs[i++]) != NULL) 
+
+    printf("\nList of Buses and Devices attached :- \n\n");
+	while ((device = devs[i++]) != NULL)
 	{
 		struct libusb_device_descriptor desc;
 
 		int r = libusb_get_device_descriptor(device, &desc);
-		if (r < 0) 
+		if (r < 0)
 		{
 			printf("\n\tFailed to get device descriptor for the device, returning");
 			return err;
@@ -324,9 +300,9 @@ int print_info(libusb_device **devs)
 	printf("\nEnter the bus no : [e.g. 2]      :");
 	err = scanf("%d",&busNo);
 	printf("Enter the device no : [e.g. 5]  :");
-	err = scanf("%d",&devNo);	
-	
-	while ((device = devs[j++]) != NULL) 
+	err = scanf("%d",&devNo);
+
+	while ((device = devs[j++]) != NULL)
 	{
 		struct libusb_device_descriptor desc;
 
@@ -335,13 +311,13 @@ int print_info(libusb_device **devs)
 	    {
 	        if ( devNo == libusb_get_device_address(device))
 	        {
-                printf("\n --------------------------------------------------------------------------------------------");  
+                printf("\n --------------------------------------------------------------------------------------------");
 	            printf("\nYou have selected USB device : %04x:%04x:%04x\n\n", \
 	            desc.idVendor, desc.idProduct,desc.bcdUSB);
 	            return 0;
 	         }
 	    }
-	}    
+	}
 
     printf("\nIllegal/nonexistant device, please restart and enter correct busNo, devNo");
     return err;
@@ -350,7 +326,7 @@ int print_info(libusb_device **devs)
 // Show command line help
 void show_help()
 {
-	// Show the help to user with all the valid argument format	
+	// Show the help to user with all the valid argument format
 	//printf("\n\t USBTestApp -- HELP \n\n");
 	return;
 }
@@ -359,7 +335,7 @@ void show_help()
 void scan_arg()
 {
 	//If arguments not correct show help
-	show_help();	
+	show_help();
 	return;
 }
 
@@ -378,7 +354,7 @@ int main()
     {
         printf("\n\t The libusb library failed to initialise, returning");
         return(err);
-     }   
+     }
 
     //Detect all devices on the USB bus.
     cnt = libusb_get_device_list(NULL, &devs);
@@ -387,15 +363,15 @@ int main()
         printf("\n\t No device is connected to USB bus, returning ");
         return (int)cnt;
     }
-    
-    //print all devices on the bus 
+
+    //print all devices on the bus
     err = print_info(devs);
     if(err)
     {
         printf("\nEnding the program, due to error\n");
         return(err);
-     }   
-    
+     }
+
     //open the device handle for all future operations
     err = libusb_open (device, &dev_handle);
     if(err)
@@ -403,10 +379,10 @@ int main()
         printf("\nThe device is not opening, check the error code, returning\n");
         return err;
     }
-    
+
     //since the use of device list is over, free it
     libusb_free_device_list(devs, 1);
-    
+
     do{
         //what user want to do with selected device
         printf("What do you want to do ?");
@@ -415,7 +391,7 @@ int main()
         printf("\n3. Exit");
         printf("\n\nEnter the choice [e.g 3]   :");
         err = scanf("%d",&usr_choice);
-       
+
         switch(usr_choice)
         {
             case 1:
@@ -426,17 +402,17 @@ int main()
                 break;
             case 3:
                 printf("\nExiting");
-                return 0;                
+                return 0;
             default:
                 printf("\nPlease enter the correct choice between 1 to 3\n");
         }
     }while(1); // loop continuously till exit
-             
+
     //All tasks done close the device handle
     libusb_close(dev_handle);
-    
+
     //Exit from libusb library
     libusb_exit(NULL);
-    
+
 	return 0;
 }
